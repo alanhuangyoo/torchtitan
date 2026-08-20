@@ -55,12 +55,6 @@ uv pip install --force-reinstall --pre \
   "torchao==0.18.0"
 ```
 
-For the TorchTitan `0.3.0` release only, install torchdata `0.11.0`. Remove
-this special step from later release instructions as it is no longer needed.
-
-```bash
-uv pip install "torchdata==0.11.0"
-```
 
 ### 1C - Run unit and smoke tests
 
@@ -167,6 +161,8 @@ To run it:
 2. Click **Run workflow**.
 3. Select the release branch, for example `release/0.3`.
 4. Start the workflow.
+5. When prompted, open **Review deployments**, select the protected
+   `test-release` environment, and click **Approve and deploy**.
 
 ### 3C - Confirm the staged release
 
@@ -193,22 +189,29 @@ For Python 3.11 and 3.12, the job creates a clean virtual environment and:
 
 Confirm that every `validate-rc` matrix job is green.
 
-Equivalent manual installation check:
+Optional manual GPU installation check:
 
 ```bash
 python -m pip install --pre \
-  --index-url https://download.pytorch.org/whl/test/cpu \
+  --index-url https://download.pytorch.org/whl/test/cu130 \
   "torch==2.14.0" \
   "torchvision==0.29.0" \
-  "torchao==0.18.0" \
-  "triton==3.8.0"
+  "torchao==0.18.0"
 
 python -m pip install \
   --index-url https://test.pypi.org/simple/ \
   --extra-index-url https://pypi.org/simple/ \
   "torchtitan==0.3.0rc1"
 
-python -c "import torchtitan; print(torchtitan.__version__, torchtitan.__file__)"
+python - <<'PY'
+import torch
+import torchtitan
+
+assert torch.cuda.is_available()
+print(f"torchtitan={torchtitan.__version__} ({torchtitan.__file__})")
+print(f"torch={torch.__version__}, cuda={torch.version.cuda}")
+print(f"gpu={torch.cuda.get_device_name(0)}")
+PY
 ```
 
 ### 4B - On-demand GPU RC validation
@@ -225,17 +228,23 @@ To run it:
 3. Select the release branch, for example `release/0.3`.
 4. Start the workflow and wait for every validation job to finish.
 
-The workflow covers:
+The workflow runs two standard CUDA jobs on 8x A10G and two H100-specific jobs
+on 8x H100:
 
-- `validate-standard-gpu` on 8x A10G: CUDA golden losses, models, features,
-  Flux, and the standard GraphTrainer suite;
-- `validate-h100` on 8x H100: the core H100 suite, including DeepSeek
-  HybridEP/DeepEP; and
-- `validate-graph-trainer-h100` on 8x H100: GraphTrainer DeepSeek and Qwen3 MoE
-  tests that require H100-class hardware.
+- `validate-standard-gpu` with the `core` suite checks the installed RC and
+  dependency versions, DistMuon, Llama 3 and Qwen3 MoE golden losses,
+  FSDP-to-HSDP parity, the core feature and model suites, and Flux;
+- `validate-standard-gpu` with the `graph-trainer` suite runs the standard
+  GraphTrainer integrations, numerics, graph passes, profiler, tracing,
+  precompile, bitwise-determinism, and SAC peak-memory tests;
+- `validate-h100` runs the dedicated core H100 suite, including the
+  HybridEP/DeepEP path; and
+- `validate-graph-trainer-h100` runs the H100 GraphTrainer integrations, MoE
+  numerics, DeepSeek V3 precompile, and bitwise-determinism tests.
 
-RL, TorchFT, and the Transformers modeling backend are not included in this RC
-GPU workflow.
+Every job installs and imports the exact TestPyPI RC from `site-packages` and
+checks the expected `torch`, `torchvision`, and `torchao` versions. RL, TorchFT,
+and the Transformers modeling backend are intentionally not included.
 
 ### 4C - Release acceptance criteria
 
@@ -245,7 +254,9 @@ Before finalizing the version, confirm that:
 - every GPU validation job is green;
 - logs show the exact TorchTitan RC loaded from `site-packages`;
 - logs show the expected `torch`, `torchvision`, and `torchao` versions;
-- the A10G golden-loss comparisons match exactly; and every model and feature test completes successfully.
+- both golden-loss comparisons match exactly; and
+- every enabled core, feature, model, Flux, GraphTrainer, and H100 test
+  completes successfully.
 
 If the staged package needs a code fix, follow Step 5, increment the RC version,
 publish the new RC, and repeat the validation. Never reuse an RC version.
@@ -323,7 +334,7 @@ After all CPU and GPU RC validations are green:
 3. Click **Generate release notes**. Verify that the **Full Changelog** compares
    against the previous release tag, then organize the changes and add the
    pinned torch and torchao versions plus a short highlight summary.
-4. Select **Set as a pre-release**, following the current TorchTitan convention.
+4. Do not select **Set as a pre-release** for the final stable release.
 5. Click **Publish**. This triggers
    [`.github/workflows/release.yml`](../.github/workflows/release.yml).
 6. When prompted, approve the protected `release` environment deployment.
@@ -356,3 +367,33 @@ Then:
 3. Run a short debug-model training check against the installed PyPI wheel.
    Verify that the loss is finite and decreases. An import check alone is not
    sufficient.
+
+## Release validation coverage
+
+### Current validation layers
+
+1. **Pre-branch CI on `main`:** lint, CPU unit tests, core GPU integration
+   tests, and the latest available CI for projects under
+   `torchtitan/experiments/`.
+2. **Release-specific source validation:** local unit and smoke tests plus
+   representative Llama 3 and Qwen3 MoE numerical checks against the pinned
+   PyTorch release-staging packages.
+3. **TestPyPI CPU validation:** clean Python 3.11 and 3.12 environments install
+   the staged RC, verify package versions and import location, and run a short
+   forward, backward, and optimizer step with finite and decreasing loss.
+4. **TestPyPI GPU validation:** two 8x A10G jobs and two 8x H100 jobs install
+   the staged RC and pinned GPU packages, then run core models, features,
+   golden losses, Flux, GraphTrainer, and the dedicated H100 suites.
+5. **Production PyPI validation:** a clean environment installs the final
+   wheels, verifies the installed package, and runs a short debug-model
+   training check.
+
+### Tests not currently run against the staged RC
+
+- **Experimental projects:** RL, TorchFT, and the Transformers modeling backend.
+- **Additional platforms:** ROCm.
+- **Scale and durability:** multi-node or more-than-eight-GPU runs, full-size
+  models, long contexts, extended convergence, and checkpoint or resharding
+  tests at scale.
+- **Performance:** throughput, memory, compilation-time, and communication
+  regression thresholds.
